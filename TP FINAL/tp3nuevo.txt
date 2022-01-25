@@ -1,0 +1,511 @@
+#include <stdint.h>//para redefiniciones de tipo uint32, uint8 etc
+#include <stdbool.h>
+#include <math.h>
+#include "hw_types.h"
+#include "hw_memmap.h"
+#include "hw_timer.h"
+#include "hw_nvic.h"
+#include "hw_gpio.h"
+#include "hw_sysctl.h"
+#include "gpio.h"
+#include "sysctl.h"
+#include "timer.h"
+#include "interrupt.h"
+//Motor sentido horario E2-MARRON, E3-NARANJA, E4-NEGRO, E5-AMARILLO
+////Motor sentido horario nuevo C4-MARRON, C5-NARANJA, C6-NEGRO, C7-AMARILLO
+//---------------------------------Variables-----------------------------------
+uint8_t vector[10]={0xFC,0x60,0xDA,0xF2,0x66,0xB6,0xBE,0xE0,0xFE,0xF6}; // Orden de los segmentos: a,b,c,d,e,f,g,punto para Katodo
+uint32_t punto=0x01;
+uint8_t comienzo=1, pausa=0, interrupcion=0;
+uint8_t prender_display=1;
+uint32_t secuencia_motor=0;
+uint8_t vec_bobina[4]={0x10,0x20,0x40,0x80};
+int8_t bobina=0;
+uint32_t ledrojo,variable=0;
+uint32_t grados_cantidad=0,grados_redondeo=0,grados_truncamiento=0;
+char  grados_un=0,grados_dec=0,grados_cen=0;
+float grados_valor=0;
+uint32_t display_uno=0xFC,display_dos=0xFC,display_tres=0xFC;// Para Katodo
+uint32_t sentido=0,decrementar=0;
+uint32_t vartime=50000;
+//usan 100000 para vartime
+void Configuracion(void);
+//---------------------------------Interrupciones-----------------------------
+//---------------------------------POR TIEMPO------------------------------
+void Timer0_Interrupt(void)
+{
+    if(HWREG(TIMER0_BASE + TIMER_O_RIS) & (TIMER_RIS_TATORIS))//pregunta por el bit menos significativo del registro, para ver si llegue al final de la cuenta
+       {
+         HWREG(GPIO_PORTF_BASE + (GPIO_PIN_1<<2)) =~ HWREG(GPIO_PORTF_BASE + (GPIO_PIN_1<<2));//si el led estaba prendido se apaga, y si estaba apagado se prende.
+
+         HWREG(TIMER0_BASE + TIMER_O_ICR) |= TIMER_ICR_TATOCINT;//para borrar el tatoris, escribo un uno en el tatocint, por eso la or.
+       }
+    if(grados_cantidad<6)
+    {
+        display_tres=vector[grados_un];
+        display_dos=vector[grados_dec];
+        display_uno=vector[grados_cen];
+    }
+    if(grados_cantidad<56)
+    {
+        display_tres=vector[grados_un];
+        display_dos=vector[grados_dec];
+        display_uno=vector[grados_cen];
+    }
+    if(grados_cantidad>=56)
+    {
+        display_tres=vector[grados_un];
+        display_dos=vector[grados_dec];
+        display_uno=vector[grados_cen];
+    }
+    if (prender_display==1)
+    {
+        //habilito salida a transistor 3
+        HWREG(GPIO_PORTD_BASE + (0xFF << 2)) = 0;
+        HWREG(GPIO_PORTB_BASE + (0xFF << 2)) = 0;
+        HWREG(GPIO_PORTB_BASE + (0xFF << 2)) = display_tres;
+        if(sentido==1)
+            {
+            HWREG(GPIO_PORTB_BASE + (0xFF << 2)) |= punto;
+            }
+        HWREG(GPIO_PORTD_BASE + (0xFF << 2)) = GPIO_PIN_2;
+    }
+    if (prender_display==2)
+        {
+        HWREG(GPIO_PORTD_BASE + (0xFF << 2)) = 0;
+        HWREG(GPIO_PORTB_BASE + (0xFF << 2)) = 0;
+        //habilito salida a transistor 2
+        HWREG(GPIO_PORTB_BASE + (0xFF << 2)) = display_dos;
+        if(sentido==1)
+            {
+            HWREG(GPIO_PORTB_BASE + (0xFF << 2)) |= punto;
+            }
+        HWREG(GPIO_PORTD_BASE + (0xFF << 2)) = GPIO_PIN_1;// habilitamos el transistor debido
+        }
+    if (prender_display==3)
+        {
+        //habilito salida a transistor 1
+        HWREG(GPIO_PORTD_BASE + (0xFF << 2)) = 0;
+        HWREG(GPIO_PORTB_BASE + (0xFF << 2)) = 0;
+        HWREG(GPIO_PORTB_BASE + (0xFF << 2)) = display_uno;
+        if(sentido==1)
+            {
+            HWREG(GPIO_PORTB_BASE + (0xFF << 2)) |= punto;
+            }
+        HWREG(GPIO_PORTD_BASE + (0xFF << 2)) = GPIO_PIN_0;// habilitamos el transistor debido
+        }
+    prender_display++;
+        if(prender_display>3)
+        {
+            prender_display=1;
+        }
+     if (comienzo==0 && grados_cantidad>0 && sentido==0 && pausa==0)
+     {
+     secuencia_motor++;
+         if(secuencia_motor==50)
+         {
+         HWREG(GPIO_PORTC_BASE + (0xF0 << 2)) = 0x00;
+         HWREG(GPIO_PORTC_BASE + (0xF0 << 2)) = vec_bobina[bobina];
+         bobina++;
+         grados_cantidad--;
+         grados_valor=grados_cantidad*1.8;
+         grados_truncamiento=(uint32_t)grados_valor;
+         grados_redondeo=ceil(grados_valor);
+
+         if ((grados_valor-grados_truncamiento)<0.5)
+         {
+         grados_valor=grados_truncamiento;
+         }
+         else
+         {
+         grados_valor=grados_redondeo;
+         }
+         if (bobina>3)
+         {
+             bobina=0;
+         }
+         secuencia_motor=0;
+         }
+       if(grados_cantidad == 0)
+       {
+           comienzo=1;
+           sentido=0;
+       }
+
+     }
+     if (comienzo==0 && grados_cantidad>0 && sentido==1 && pausa==0)
+        {
+            secuencia_motor++;
+            if(secuencia_motor==50)
+            {
+            HWREG(GPIO_PORTC_BASE + (0xF0 << 2)) = 0x00;
+            HWREG(GPIO_PORTC_BASE + (0xF0 << 2)) = vec_bobina[bobina];
+            bobina--;
+            grados_cantidad--;
+            grados_valor=grados_cantidad*1.8;
+            grados_truncamiento=(uint32_t)grados_valor;
+            grados_redondeo=ceil(grados_valor);
+            if ((grados_valor-grados_truncamiento)<0.5)
+            {
+            grados_valor=grados_truncamiento;
+            }
+            else
+            {
+            grados_valor=grados_redondeo;
+            }
+            if(bobina<0)
+            {
+            bobina=3;
+            }
+            secuencia_motor=0;
+            }
+            if(grados_cantidad == 0)
+               {
+                   comienzo=1;
+                   sentido=0;
+               }
+        }
+
+}
+//---------------------------------Por switch------------------------------
+void PortF_Interrupt(void)
+{
+    //PIN de detener (PF0)---------------------------------------------------------------------------------
+    if((HWREG(GPIO_PORTF_BASE + GPIO_O_RIS)) & 0x01)
+    {
+    if (pausa==1 & interrupcion==0)
+    {
+          int contador=0;
+            do
+            {
+                contador++;
+            }while(contador<vartime);
+            if (contador>=vartime)
+               {
+                   pausa=0;
+                   interrupcion=1;
+               }
+    }
+    if (comienzo==0 & interrupcion==0)
+    {
+        int contador=0;
+            do
+            {
+                contador++;
+            }while(contador<vartime);
+        if ((contador>=vartime) & (comienzo == 0))
+        {
+            pausa=1;
+            interrupcion=1;
+        }
+    }
+    if (comienzo==1 & interrupcion==0)
+    {
+        int contador=0;
+        do
+        {
+            contador++;
+        }while(contador<vartime);
+        if (contador>=vartime)
+        {
+            comienzo=0;
+            interrupcion=1;
+        }
+    }
+    interrupcion=0;
+    }
+
+    HWREG(GPIO_PORTF_BASE + GPIO_O_ICR) = GPIO_PIN_0; //---------------Borro los flags de interrupcion RIS y MIS
+
+    //-------------------------------------------------------------------------------------------
+    //PIN de Incrementar (PF4)---------------------------------------------------------------------------------
+    if ((HWREG(GPIO_PORTF_BASE + GPIO_O_RIS)) & 0x10)
+    {
+    int contador=0;
+    do
+    {
+        contador++;
+    }while(  (HWREG(GPIO_PORTF_BASE + (GPIO_PIN_4 << 2)) == 0) && (contador<vartime));
+
+    if (contador>=vartime)
+    {
+        grados_cantidad++;
+        grados_valor=grados_cantidad*1.8;
+        grados_truncamiento=(uint32_t)grados_valor;
+        grados_redondeo=ceil(grados_valor);
+        if ((grados_valor-grados_truncamiento)<0.5)
+        {
+        grados_valor=grados_truncamiento;
+        }
+        else
+        {
+        grados_valor=grados_redondeo;
+        }
+    }
+    HWREG(GPIO_PORTF_BASE + GPIO_O_ICR) = GPIO_PIN_4; //---------------Borro los flags de interrupcion RIS y MIS
+    }
+    HWREG(GPIO_PORTF_BASE + GPIO_O_ICR) = GPIO_PIN_1;
+}//De la interrupcion
+void PortE_Interrupt(void)
+    {
+      if((HWREG(GPIO_PORTE_BASE + GPIO_O_RIS)) & 0x01) //pregunta por el flag del pin 0
+      {
+          int contador=0;
+           do
+           {
+               contador++;
+           }while((HWREG(GPIO_PORTE_BASE + (GPIO_PIN_0 << 2)) == 0) && (contador<vartime));
+           if(contador>=vartime)
+           {
+             if(grados_cantidad > 0)
+               {
+                   grados_cantidad=grados_cantidad-1;
+                   grados_valor=grados_cantidad*1.8;
+                   grados_truncamiento=(uint32_t)grados_valor;
+                   grados_redondeo=ceil(grados_valor);
+                   if ((grados_valor-grados_truncamiento)<0.5)
+                   {
+                   grados_valor=grados_truncamiento;
+                   }
+                   else
+                   {
+                   grados_valor=grados_redondeo;
+                   }
+
+                   if ((grados_valor-((10*grados_dec)+(100*grados_cen)))<0)
+                   {
+                       if (grados_cen>0 & grados_dec==0)
+                       {
+                           grados_cen--;
+                           grados_dec=9;
+                           grados_un=9;
+                       }
+                       else
+                       {
+                           grados_dec--;
+                       }
+
+                   }
+               }
+           }
+      HWREG(GPIO_PORTE_BASE + GPIO_O_ICR) = GPIO_PIN_0;//Borro los flags de todos los pines utilizados del puerto E
+      }
+      if((HWREG(GPIO_PORTE_BASE + GPIO_O_RIS)) & 0x02)//pregunta por el flag del pin 1
+      {
+         int contador=0;
+         do
+         {
+             contador++;
+         }while((HWREG(GPIO_PORTE_BASE + (GPIO_PIN_1 << 2)) == 0) && (contador<vartime));
+         if(contador>=vartime)
+         {
+         sentido=1;
+         }
+         HWREG(GPIO_PORTE_BASE + GPIO_O_ICR) = GPIO_PIN_1;
+      }
+    }
+int main(void)
+{
+    SysCtlClockSet(SYSCTL_USE_PLL | SYSCTL_XTAL_16MHZ | SYSCTL_SYSDIV_2_5 | SYSCTL_OSC_MAIN);
+     //t=12.5e-9
+     //para tener 0.5seg, se necesita un contador que llegue a 40 millones
+    Configuracion();
+//-------------------------------------------------------------------------------------------------------------------
+  while(1)
+  {
+      if(comienzo==1)
+      {
+        while (((grados_valor-((10*grados_dec)+(100*grados_cen)))>9) && (grados_dec>8))
+        {
+            grados_dec=0;
+            grados_cen++;
+            grados_valor=grados_valor-100;
+        }
+        while (((grados_valor-((10*grados_dec)+(100*grados_cen)))>9) && (grados_un>6))
+        {
+            if(grados_dec==9)
+            {
+                grados_dec=0;
+            }
+            else
+            {
+               grados_dec++;
+            }
+            grados_valor=grados_valor-10;
+        }
+        if ((grados_valor-((10*grados_dec)+(100*grados_cen)))<10)
+        {
+                grados_un=(grados_valor-((10*grados_dec)+(100*grados_cen)));
+                if(grados_cantidad<5)
+                {
+                    grados_dec=0;
+                }
+        }
+      }
+      else
+      {
+          if (((grados_valor-((10*grados_dec)+(100*grados_cen)))<0) && (grados_un<3) && (grados_dec==0))
+            {
+              grados_dec=9;
+              grados_cen--;
+            }
+        if (((grados_valor-((10*grados_dec)+(100*grados_cen)))<0) && (grados_un<2))
+          {
+                 grados_dec--;
+          }
+        if ((grados_valor-((10*grados_dec)+(100*grados_cen)))<10)
+          {
+              grados_un=(grados_valor-((10*grados_dec)+(100*grados_cen)));
+              if (grados_un==-1)
+              {
+              grados_un=9;
+              grados_dec--;
+              }
+              if (grados_un==-2)
+              {
+              grados_un=8;
+              grados_dec--;
+              }
+              if(grados_cantidad<5)
+              {
+                  grados_dec=0;
+              }
+          }
+      }
+ }//Del while (1)
+}//Del main
+
+void Configuracion(void)
+{
+    //--------------------------HABILITACION NVIC---------------------------------------------
+       HWREG(NVIC_EN0) |= (0x01 << 30); //-------------------pongo un uno en la interrupcion 30, que corresponde al puerto F
+       HWREG(NVIC_EN0) |= (0x01 << 4); //-------------------pongo un uno en la interrupcion 4, que corresponde al puerto E
+    //--------------------------------------Configuracion de los puertos-----------------------------------------------------------
+        //Configuracion del puerto F
+        HWREG(SYSCTL_RCGC2) |= SYSCTL_RCGC2_GPIOF;//Habilito el clock del puerto F
+        //Desbloqueo de switch 2 para utilizacion
+        HWREG(GPIO_PORTF_BASE + GPIO_O_LOCK) = 0x4C4F434B;
+        HWREG(GPIO_PORTF_BASE + GPIO_O_CR) = 0xFF;
+        //PIN 4 (Switch 1, incrementa)
+        HWREG(GPIO_PORTF_BASE + GPIO_O_DIR) &= ~GPIO_PIN_4;//Habilito el pin como entrada
+        HWREG(GPIO_PORTF_BASE + GPIO_O_AFSEL) &= ~GPIO_PIN_4;//LE SACO LA FUNCION ALTERNATIVA
+        HWREG(GPIO_PORTF_BASE + GPIO_O_PUR) |= GPIO_PIN_4;//HABILITO EL PULL UP
+        HWREG(GPIO_PORTF_BASE + GPIO_O_DEN) |= GPIO_PIN_4; //F4 PIN DIGITAL
+        //PIN 0 (Switch 2, Para o arranca)
+        HWREG(GPIO_PORTF_BASE + GPIO_O_DIR) &= ~GPIO_PIN_0;//Habilito el pin como entrada
+        HWREG(GPIO_PORTF_BASE + GPIO_O_AFSEL) &= ~GPIO_PIN_0;//LE SACO LA FUNCION ALTERNATIVA
+        HWREG(GPIO_PORTF_BASE + GPIO_O_PUR) |= GPIO_PIN_0;//HABILITO EL PULL UP
+        HWREG(GPIO_PORTF_BASE + GPIO_O_DEN) |= GPIO_PIN_0; //F4 PIN DIGITAL
+        //Configuracion momentanea para utilizar led RGB
+        HWREG(GPIO_PORTF_BASE + GPIO_O_DIR) |= GPIO_PIN_1; //PONGO EL PIN COMO SALIDA
+        HWREG(GPIO_PORTF_BASE + GPIO_O_AFSEL) &= ~GPIO_PIN_1; //PONGO CERO EN LA FUNCION ALTERNATIVA, PARA QUE NO JODA
+        HWREG(GPIO_PORTF_BASE + GPIO_O_DEN) |= GPIO_PIN_1; //F1 PIN DIGITAL
+    //--------------------------------------------------------------------------------------------------------------------
+        //Configuración puerto B
+        HWREG(SYSCTL_RCGC2) |= SYSCTL_RCGC2_GPIOB;//Habilita el clock del puerto B
+        //PIN 0
+        HWREG(GPIO_PORTB_BASE + GPIO_O_DIR) |= GPIO_PIN_0; //PONGO EL PIN COMO SALIDA
+        HWREG(GPIO_PORTB_BASE + GPIO_O_AFSEL) &= ~GPIO_PIN_0; //PONGO CERO EN LA FUNCION ALTERNATIVA, PARA QUE NO JODA
+        HWREG(GPIO_PORTB_BASE + GPIO_O_DEN) |= GPIO_PIN_0; //F1 PIN DIGITAL
+        //PIN 1
+        HWREG(GPIO_PORTB_BASE + GPIO_O_DIR) |= GPIO_PIN_1; //PONGO EL PIN COMO SALIDA
+        HWREG(GPIO_PORTB_BASE + GPIO_O_AFSEL) &= ~GPIO_PIN_1; //PONGO CERO EN LA FUNCION ALTERNATIVA, PARA QUE NO JODA
+        HWREG(GPIO_PORTB_BASE + GPIO_O_DEN) |= GPIO_PIN_1; //F1 PIN DIGITAL
+        //PIN 2
+        HWREG(GPIO_PORTB_BASE + GPIO_O_DIR) |= GPIO_PIN_2; //PONGO EL PIN COMO SALIDA
+        HWREG(GPIO_PORTB_BASE + GPIO_O_AFSEL) &= ~GPIO_PIN_2; //PONGO CERO EN LA FUNCION ALTERNATIVA, PARA QUE NO JODA
+        HWREG(GPIO_PORTB_BASE + GPIO_O_DEN) |= GPIO_PIN_2; //F1 PIN DIGITAL
+        //PIN 3
+        HWREG(GPIO_PORTB_BASE + GPIO_O_DIR) |= GPIO_PIN_3; //PONGO EL PIN COMO SALIDA
+        HWREG(GPIO_PORTB_BASE + GPIO_O_AFSEL) &= ~GPIO_PIN_3; //PONGO CERO EN LA FUNCION ALTERNATIVA, PARA QUE NO JODA
+        HWREG(GPIO_PORTB_BASE + GPIO_O_DEN) |= GPIO_PIN_3; //F1 PIN DIGITAL
+        //PIN 4
+        HWREG(GPIO_PORTB_BASE + GPIO_O_DIR) |= GPIO_PIN_4; //PONGO EL PIN COMO SALIDA
+        HWREG(GPIO_PORTB_BASE + GPIO_O_AFSEL) &= ~GPIO_PIN_4; //PONGO CERO EN LA FUNCION ALTERNATIVA, PARA QUE NO JODA
+        HWREG(GPIO_PORTB_BASE + GPIO_O_DEN) |= GPIO_PIN_4; //F1 PIN DIGITAL
+        //PIN 5
+        HWREG(GPIO_PORTB_BASE + GPIO_O_DIR) |= GPIO_PIN_5; //PONGO EL PIN COMO SALIDA
+        HWREG(GPIO_PORTB_BASE + GPIO_O_AFSEL) &= ~GPIO_PIN_5; //PONGO CERO EN LA FUNCION ALTERNATIVA, PARA QUE NO JODA
+        HWREG(GPIO_PORTB_BASE + GPIO_O_DEN) |= GPIO_PIN_5; //F1 PIN DIGITAL
+        //PIN 6
+        HWREG(GPIO_PORTB_BASE + GPIO_O_DIR) |= GPIO_PIN_6; //PONGO EL PIN COMO SALIDA
+        HWREG(GPIO_PORTB_BASE + GPIO_O_AFSEL) &= ~GPIO_PIN_6; //PONGO CERO EN LA FUNCION ALTERNATIVA, PARA QUE NO JODA
+        HWREG(GPIO_PORTB_BASE + GPIO_O_DEN) |= GPIO_PIN_6; //F1 PIN DIGITAL
+        //PIN 7
+        HWREG(GPIO_PORTB_BASE + GPIO_O_DIR) |= GPIO_PIN_7; //PONGO EL PIN COMO SALIDA
+        HWREG(GPIO_PORTB_BASE + GPIO_O_AFSEL) &= ~GPIO_PIN_7; //PONGO CERO EN LA FUNCION ALTERNATIVA, PARA QUE NO JODA
+        HWREG(GPIO_PORTB_BASE + GPIO_O_DEN) |= GPIO_PIN_7; //F1 PIN DIGITAL
+    //--------------------------------------------------------------------------------------------------------------------
+        //Configuracion Puerto E
+        HWREG(SYSCTL_RCGC2) |= SYSCTL_RCGC2_GPIOE;//Habilita el clock del puerto E
+        //PIN 0 (Switch, Decrementa)
+        HWREG(GPIO_PORTE_BASE + GPIO_O_DIR) &= ~GPIO_PIN_0;//Habilito el pin como entrada
+        HWREG(GPIO_PORTE_BASE + GPIO_O_AFSEL) &= ~GPIO_PIN_0;//LE SACO LA FUNCION ALTERNATIVA
+        HWREG(GPIO_PORTE_BASE + GPIO_O_PUR) |= GPIO_PIN_0;//HABILITO EL PULL UP
+        HWREG(GPIO_PORTE_BASE + GPIO_O_DEN) |= GPIO_PIN_0; //F4 PIN DIGITAL
+        //PIN 1 (Switch, Sentido)
+        HWREG(GPIO_PORTE_BASE + GPIO_O_DIR) &= ~GPIO_PIN_1;//Habilito el pin como entrada
+        HWREG(GPIO_PORTE_BASE + GPIO_O_AFSEL) &= ~GPIO_PIN_1;//LE SACO LA FUNCION ALTERNATIVA
+        HWREG(GPIO_PORTE_BASE + GPIO_O_PUR) |= GPIO_PIN_1;//HABILITO EL PULL UP
+        HWREG(GPIO_PORTE_BASE + GPIO_O_DEN) |= GPIO_PIN_1; //F4 PIN DIGITAL
+    //-------------------------------------------------------------------------------------------------------------------
+        //Configuracion Puerto C
+        HWREG(SYSCTL_RCGC2) |= SYSCTL_RCGC2_GPIOC;//Habilita el clock del puerto C
+        //C4 Motor
+        HWREG(GPIO_PORTC_BASE + GPIO_O_DIR) |= GPIO_PIN_4; //PONGO EL PIN COMO SALIDA
+        HWREG(GPIO_PORTC_BASE + GPIO_O_AFSEL) &= ~GPIO_PIN_4; //PONGO CERO EN LA FUNCION ALTERNATIVA, PARA QUE NO JODA
+        HWREG(GPIO_PORTC_BASE + GPIO_O_DEN) |= GPIO_PIN_4; //F1 PIN DIGITAL
+        //C5 Motor
+        HWREG(GPIO_PORTC_BASE + GPIO_O_DIR) |= GPIO_PIN_5; //PONGO EL PIN COMO SALIDA
+        HWREG(GPIO_PORTC_BASE + GPIO_O_AFSEL) &= ~GPIO_PIN_5; //PONGO CERO EN LA FUNCION ALTERNATIVA, PARA QUE NO JODA
+        HWREG(GPIO_PORTC_BASE + GPIO_O_DEN) |= GPIO_PIN_5; //F1 PIN DIGITAL
+        //C6 Motor
+        HWREG(GPIO_PORTC_BASE + GPIO_O_DIR) |= GPIO_PIN_6; //PONGO EL PIN COMO SALIDA
+        HWREG(GPIO_PORTC_BASE + GPIO_O_AFSEL) &= ~GPIO_PIN_6; //PONGO CERO EN LA FUNCION ALTERNATIVA, PARA QUE NO JODA
+        HWREG(GPIO_PORTC_BASE + GPIO_O_DEN) |= GPIO_PIN_6; //F1 PIN DIGITAL
+        //C7 Motor
+        HWREG(GPIO_PORTC_BASE + GPIO_O_DIR) |= GPIO_PIN_7; //PONGO EL PIN COMO SALIDA
+        HWREG(GPIO_PORTC_BASE + GPIO_O_AFSEL) &= ~GPIO_PIN_7; //PONGO CERO EN LA FUNCION ALTERNATIVA, PARA QUE NO JODA
+        HWREG(GPIO_PORTC_BASE + GPIO_O_DEN) |= GPIO_PIN_7; //F1 PIN DIGITAL
+    //--------------------------------------------------------------------------------------------------------------------
+        //Configuracion Puerto D
+        HWREG(SYSCTL_RCGC2) |= SYSCTL_RCGC2_GPIOD;//Habilita el clock del puerto D
+        //PIN 0
+        HWREG(GPIO_PORTD_BASE + GPIO_O_DIR) |= GPIO_PIN_0; //PONGO EL PIN COMO SALIDA
+        HWREG(GPIO_PORTD_BASE + GPIO_O_AFSEL) &= ~GPIO_PIN_0; //PONGO CERO EN LA FUNCION ALTERNATIVA, PARA QUE NO JODA
+        HWREG(GPIO_PORTD_BASE + GPIO_O_DEN) |= GPIO_PIN_0; //F1 PIN DIGITAL
+        //PIN 1
+        HWREG(GPIO_PORTD_BASE + GPIO_O_DIR) |= GPIO_PIN_1; //PONGO EL PIN COMO SALIDA
+        HWREG(GPIO_PORTD_BASE + GPIO_O_AFSEL) &= ~GPIO_PIN_1; //PONGO CERO EN LA FUNCION ALTERNATIVA, PARA QUE NO JODA
+        HWREG(GPIO_PORTD_BASE + GPIO_O_DEN) |= GPIO_PIN_1; //F1 PIN DIGITAL
+        //PIN 2
+        HWREG(GPIO_PORTD_BASE + GPIO_O_DIR) |= GPIO_PIN_2; //PONGO EL PIN COMO SALIDA
+        HWREG(GPIO_PORTD_BASE + GPIO_O_AFSEL) &= ~GPIO_PIN_2; //PONGO CERO EN LA FUNCION ALTERNATIVA, PARA QUE NO JODA
+        HWREG(GPIO_PORTD_BASE + GPIO_O_DEN) |= GPIO_PIN_2; //F1 PIN DIGITAL
+    //--------------------------------------------------------------------------------------------------------------------
+    //--------------------------CONFIGURACION DE TIMER------------------------------------------
+        HWREG(SYSCTL_RCGC1) |= SYSCTL_RCGC1_TIMER0;//CLOCK DEL TIMER
+        HWREG(TIMER0_BASE + TIMER_O_CTL) &= ~(TIMER_CTL_TAEN);// BORRO SOLO EL BIT ENABLE
+        HWREG(TIMER0_BASE + TIMER_O_CFG) |= 0x00; //Es cero por que junta los dos timers A y B, para funcionar como uno de 32 bits
+        HWREG(TIMER0_BASE + TIMER_O_TAMR) |= TIMER_TAMR_TAMR_PERIOD | TIMER_TAMR_TACDIR; //Modo periodico, y cuenta de forma ascendente
+        HWREG(TIMER0_BASE + TIMER_O_TAILR) = 270000;//un poco mas de 300Hz,FRECUENCIA DE REFRESCO
+        HWREG(TIMER0_BASE + TIMER_O_IMR) = TIMER_IMR_TATOIM;//habilito la interrupcion por time out
+        HWREG(NVIC_EN0) |= (1 << 19);//Pongo un uno en el numero 19, que es la interrupcion del timer 0
+        HWREG(TIMER0_BASE + TIMER_O_CTL) |= TIMER_CTL_TAEN;//lo vuelvo a habilitar
+   //----------------------------------------------Configuracion de interrupciones-------------------------------------
+        HWREG(GPIO_PORTF_BASE + GPIO_O_IM) = 0x00; //-------------------deshabilito las interrupciones del pin 4 y 0 del puerto F
+        HWREG(GPIO_PORTF_BASE + GPIO_O_IS) = 0x00; //-------------------interrupciones por flanco
+        HWREG(GPIO_PORTF_BASE + GPIO_O_IBE) = 0x00;//-------------------interrupción por solamente uno de los flancos
+        HWREG(GPIO_PORTF_BASE + GPIO_O_IEV) = 0x00;//-------------------interrupción por flanco descendente
+        HWREG(GPIO_PORTF_BASE + GPIO_O_ICR) = 0xFF;//-------------------borro cualquier interrupción pendiente
+        HWREG(GPIO_PORTF_BASE + GPIO_O_IM) = GPIO_PIN_4;//--------------activo interrupciones en el bit F4
+        HWREG(GPIO_PORTF_BASE + GPIO_O_IM) |= GPIO_PIN_0;//--------------activo interrupciones en el bit F0
+        //INTERRUPCION DEL PUERTO E
+        HWREG(GPIO_PORTE_BASE + GPIO_O_IM) = 0x00; //-------------------deshabilito las interrupciones del pin 0 y 1 del puerto E
+        HWREG(GPIO_PORTE_BASE + GPIO_O_IS) = 0x00; //-------------------interrupciones por flanco
+        HWREG(GPIO_PORTE_BASE + GPIO_O_IBE) = 0x00;//-------------------interrupción por solamente uno de los flancos
+        HWREG(GPIO_PORTE_BASE + GPIO_O_IEV) = 0x00;//-------------------interrupción por flanco descendente
+        HWREG(GPIO_PORTE_BASE + GPIO_O_ICR) = 0xFF;//-------------------borro cualquier interrupción pendiente
+        HWREG(GPIO_PORTE_BASE + GPIO_O_IM) = GPIO_PIN_0;//--------------activo interrupciones en el bit E0
+        HWREG(GPIO_PORTE_BASE + GPIO_O_IM) |= GPIO_PIN_1;//--------------activo interrupciones en el bit E1
+}

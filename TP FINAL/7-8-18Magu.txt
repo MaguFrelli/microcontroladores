@@ -1,0 +1,567 @@
+//#define PART_TM4C123GH6PM
+//#define TARGET_IS_TM4C123_RA1
+
+//#ifndef DOXYGEN
+
+//----------
+#include <stdint.h>
+#include <stdbool.h>
+#include "hw_sysctl.h"
+#include "hw_types.h"
+//DATOS AGREGADOS PARA ADC
+#include <math.h>
+#include "hw_timer.h"
+#include "hw_nvic.h"
+#include "hw_adc.h"
+#include "timer.h"
+#include "interrupt.h"
+//-------------
+#include "hw_memmap.h"
+#include "hw_ints.h"
+#include "hw_gpio.h"
+#include "hw_types.h"
+#include "hw_ssi.h"
+
+#include "ssi.h"
+#include "gpio.h"
+#include "sysctl.h"
+
+#include "NRF24L01.h"
+//Usado como transmisor
+//#define MODO_TRANSMISOR=0         //SELECCIONAR, COMENTAR PARA MODO RECEPTOR!!!!!!!!!!! //MODO_TRANSMISOR 0=Rx y MODO_TRANSMISOR 1=Tx
+uint32_t MODO_TRANSMISOR=0;
+
+uint8_t direccion[5] ={0xE7,0xE7,0xE7,0xE7,0xE7}; //dirección por defecto que trae es aconsejable cambiarla luego
+uint8_t verifica_dire[5];
+
+#define Comienzo_de_Trama_SPI()   HWREG(GPIO_PORTA_BASE+(SDC_SSI_FSS << 2))=0             //pone a 0 la señal CSN del nRF24L01
+#define Fin_de_Trama_SPI()        HWREG(GPIO_PORTA_BASE+(SDC_SSI_FSS << 2))=SDC_SSI_FSS   //pone a 1 la señal CSN del nRF24L01
+
+#define CMD_LECTURA_nRF 0x00
+#define CMD_ESCRITURA_nRF 0x20
+uint32_t TramaSPI(int8_t ,int8_t ,int8_t ); // parametros: comando, dirección de registro, dato (importa solo si es escritura)
+
+//Registros internos del nRF24L01
+#define REG_CONFIG_nRF      0 //Usado linea 127 (1)
+#define REG_EN_AA_nRF       1 //Usado linea 136 (2)
+#define REG_EN_RXADDR_nRF   2 //Usado linea 143 (3)
+#define REG_SETUP_AW_nRF    3 //Usado linea 165 (6)
+#define REG_SETUP_RETR_nRF  4   //NO USADO
+#define REG_RF_CH_nRF       5 //Usado linea 149 (4)
+#define REG_RF_SETUP_nRF    6 //Usado linea 154 (5)
+#define REG_STATUS_nRF      7 //Usado linea 290 (8opcional)
+#define REG_OBSERVE_TX_nRF  8   //NO USADO
+#define REG_CD_nRF          9   //NO USADO
+#define REG_RX_ADDR_P0_nRF  0x0A //Unico usado y creo tiene que coincidir con el REG_RX_PW_P0_nRF (esta mas abajo)
+#define REG_RX_ADDR_P1_nRF  0x0B   //NO USADO
+#define REG_RX_ADDR_P2_nRF  0x0C   //NO USADO
+#define REG_RX_ADDR_P3_nRF  0x0D   //NO USADO
+#define REG_RX_ADDR_P4_nRF  0x0E   //NO USADO
+#define REG_RX_ADDR_P5_nRF  0x0F   //NO USADO
+#define REG_TX_ADDR_nRF     0x10 //Usado linea 197 y 205
+#define REG_RX_PW_P0_nRF    0x11 //Usado linea 221 (7)
+#define REG_RX_PW_P1_nRF    0x12   //NO USADO
+#define REG_RX_PW_P2_nRF    0x13   //NO USADO
+#define REG_RX_PW_P3_nRF    0x14   //NO USADO
+#define REG_RX_PW_P4_nRF    0x15   //NO USADO
+#define REG_RX_PW_P5_nRF    0x16   //NO USADO
+#define REG_FIFO_STATUS_nRF 0x17 //Usado linea 315  (9opcional)
+#define REG_DYNPD_nRF       0x1C   //Esta comentado en donde se usaria
+#define REG_FEATURE_nRF     0x1D   //Esta comentado en donde se usaria
+
+//Bits del registro Config, pag 57de78 del datasheet nRF24L01P
+#define MASK_RX_DR_BIT      1<<6   //NO USADO
+#define MASK_TX_DS_BIT      1<<5    //Usado linea 250
+#define MASK_MAX_RT_BIT     1<<4    //Usado linea 250
+#define EN_CRC_BIT          1<<3    //Usado linea 250
+#define CRCO_BIT            1<<2   //NO USADO
+#define PWR_UP_BIT          1<<1    //Usado linea 250
+#define PRIM_RX_BIT         1<<0    //Usado linea 259
+
+//Bits del registro REG_RF_SETUP_nRF, pag 58de78 del datasheet nRF24L01P, potencia con la que se transmitira
+#define PLL_LOCK_BIT      1<<4   //NO USADO
+#define RF_DR_BIT         1<<3   //NO USADO
+#define RF_PWR_0           0     //NO USADO
+#define RF_PWR_1          1<<1   //NO USADO
+#define RF_PWR_2          1<<2   //NO USADO
+#define RF_PWR_3          3<<1  //Usado linea 153, designa la potencia en 0dbm (maxima)
+#define LNA_HCURR_BIT      1     //NO USADO
+
+//Bits del registro REG_STATUS_nRF, pag 59de78 del datasheet nRF24L01P
+#define TX_DS         1<<5    //Usado linea 290
+#define MAX_RT        1<<4    //Usado linea 290
+#define RX_DR         1<<6
+//lectura de FIFO de recepción y transmisión
+#define R_RX_PAYLOAD   0x61 //Usado linea 368
+#define W_TX_PAYLOAD   0xA0 //Usado linea 320
+#define FLUSH_TX       0xE1 //Usado linea 284 y 346
+#define FLUSH_RX       0xE2 //Usado linea 274 y 383
+#define ACTIVATE       0x50 //hay que enviar 0x73 como dato para activar el comando R_RX_PL_WID
+#define R_RX_PL_WID    0x60 //NO USADO
+
+//-----------------------Configuraciones y delays---------------------------
+void Config_SysClock(void);
+void Config_GPIO(void);
+void Config_ADC(void);
+void delayMs(uint32_t);
+void delayUs(uint32_t);
+//--------------------------------------------------------------------------
+uint32_t status, rx ,reg_config, dato1, dato2, fifo_status;
+uint32_t count, Cant_Bytes_RX; //Cant_Bytes_RX NO USADO
+int8_t dato_temp, n;
+//AGREGADAS POR LOS PI
+uint8_t vector[10]={48,49,50,51,52,53,54,55,56,57};
+uint8_t primer_valor,segundo_valor,tercer_valor,cuarto_valor;
+uint8_t uno,dos,tres;
+uint8_t saludo[28]={'B','i','e','n','v','e','n','i','d','o',' ','¿','Q','u','é',' ','d','e','s','é','a',' ','h','a','c','e','r','?'};
+char escribo;
+uint8_t inicio=0;
+uint8_t i=0;
+uint32_t var=11,var2=22;
+uint32_t usado=0;
+//--------------------------------------------------------------------------
+//----------------------------------------Interrupción ADC---------------------------------------------------------------
+/*interrupt void IntADC0Sec1(void)
+{
+    int dato_an0;// aux_tempe;//tempe_grados;
+    if(usado==0)
+    {
+        //--------AGREGADO
+        //HWREG(UART0_BASE + UART_O_ICR) = 0x7FF;
+        //--------------------------------
+    HWREG(ADC0_BASE + ADC_O_ISC) = ADC_ISC_IN1;//BORRO EL FLAG
+    dato_an0 = HWREG(ADC0_BASE + ADC_O_SSFIFO1);//PRIMERA POSICION EN EL BUFFER DE RESULTADOS
+    //aux_tempe = HWREG(ADC0_BASE + ADC_O_SSFIFO1);//SEGUNDA POSICION EN EL BUFFER DE RESULTADOS
+    //tempe_grados =  147.5 - ((75 * 3.3 * aux_tempe) / 4096);
+
+    primer_valor=(uint8_t)(dato_an0/1000);
+    dato_an0=dato_an0-(primer_valor*1000);
+    segundo_valor=(uint8_t)(dato_an0/100);
+    dato_an0=dato_an0-(segundo_valor*100);
+    tercer_valor=(uint8_t)(dato_an0/10);
+    dato_an0=dato_an0-(tercer_valor*10);
+    cuarto_valor=(uint8_t)dato_an0;
+    usado=1;
+    }
+   //HWREG(UART0_BASE + UART_O_ICR) = 0x7FF;
+}*/
+//-------------------------------------------------------------------------------------------------------------------------
+void main(void)
+    {
+
+    Config_SysClock();
+    Config_GPIO();  //inicializa CE y CSN a 1, y el SW1 como entrada
+//    HWREG(NVIC_EN0) |= (0x01 << 15);//NVIC DEL ADC
+//    Config_ADC();
+
+    Iniciar_SPI();
+
+    //CE=0  CSN=1
+
+    delayMs(100);   //no sería necesario
+    //------------------------------------------------------------------------------------
+    //escritura de CONFIG , EN_CRC=1, CRCO=0, POWER_UP=0 , PRIM_RX=0    valores de fábrica
+    //dato_temp = 8; //dato a escribir
+    dato_temp = 0;
+    TramaSPI(CMD_ESCRITURA_nRF,  REG_CONFIG_nRF, dato_temp); //escribimos
+    reg_config = TramaSPI(CMD_LECTURA_nRF,  REG_CONFIG_nRF, 0);//check
+    while(reg_config != dato_temp){;} //si no coincide con lo que se escribió se queda acá
+    //------------------------------------------------------------------------------------
+
+    // Auto acknowledgement data pipes
+    dato_temp=0x00;//Deshabilitado
+    TramaSPI(CMD_ESCRITURA_nRF, REG_EN_AA_nRF, dato_temp); //deshabilito reconocimiento automatico
+    reg_config = TramaSPI(CMD_LECTURA_nRF,  REG_EN_AA_nRF, 0);//check
+    while(reg_config != dato_temp){;} //si no coincide con lo que se escribió se queda acá
+
+    //Enabled RX Addresses pipe 0
+    dato_temp=0x01;//
+    TramaSPI(CMD_ESCRITURA_nRF, REG_EN_RXADDR_nRF, dato_temp);
+    reg_config = TramaSPI(CMD_LECTURA_nRF,  REG_EN_RXADDR_nRF, 0);//check
+    while(reg_config != dato_temp){;} //si no coincide con lo que se escribió se queda acá
+
+    //Canal de RF  ch_rf, configuro canal 120 (por encima de la mayoria de los canales WIFI 2.400GHz)
+    dato_temp = 120; //dato a escribir
+    TramaSPI(CMD_ESCRITURA_nRF, REG_RF_CH_nRF, dato_temp); //escribimos el canal
+    reg_config = TramaSPI(CMD_LECTURA_nRF, REG_RF_CH_nRF, 0);//check
+    while(reg_config != dato_temp){;} //si no coincide con lo que se escribió se queda acá
+
+    //Velocidad de 1Mbps para ser compatible con todos los chips rf24, baja potencia (-12dB) para no generar tanto consumo en 3.3v
+    dato_temp = RF_PWR_3|(1<<5) ; // 00011b
+    TramaSPI(CMD_ESCRITURA_nRF, REG_RF_SETUP_nRF, dato_temp); //escribimos el canal
+    reg_config = TramaSPI(CMD_LECTURA_nRF, REG_RF_SETUP_nRF, 0);//check
+    while(reg_config != dato_temp){;} //si no coincide con lo que se escribió se queda acá
+
+    //configuro pipe 0
+
+    //-------------Escritura de dirección para recepción--------------------
+    //Escritura de Setup of Address Widths (0x03)= 5bytes de dirección
+    dato_temp = 3; //dato a escribir
+    TramaSPI(CMD_ESCRITURA_nRF, REG_SETUP_AW_nRF, dato_temp); //escribimos
+    reg_config = TramaSPI(CMD_LECTURA_nRF, REG_SETUP_AW_nRF, 0);//check
+    while(reg_config != dato_temp){;} //si no coincide con lo que se escribió se queda acá
+
+    //Escritura de la dirección pipe 0 de recepción 5bytes
+    Comienzo_de_Trama_SPI();
+        status = Transferir_SPI(CMD_ESCRITURA_nRF | REG_RX_ADDR_P0_nRF );   //envio comando escritura al registro
+        for(n=0;n<5;n++) dato_temp = Transferir_SPI(direccion[n]);  //enviamos los 5 bytes de dirección
+        delayUs(10);
+    Fin_de_Trama_SPI();
+
+    delayUs(1000);
+    //lectura de verificación para la dirección pipe 0 5bytes
+    Comienzo_de_Trama_SPI();
+        status = Transferir_SPI(CMD_LECTURA_nRF | REG_RX_ADDR_P0_nRF ); //envio comando escritura al registro
+        for(n=0;n<5;n++) verifica_dire[n] = Transferir_SPI(0);  //leemos los 5 bytes de dirección
+        delayUs(10);
+    Fin_de_Trama_SPI();
+
+    delayUs(1000);
+
+    //check si coincide la dirección leida con la que enviamos
+    for(n=0;n<5;n++)
+    {
+        if(direccion[n]!=verifica_dire[n]) while(1);   //se clava aquí si no coinciden
+    }
+
+    //--------------------------------------------------------------------------
+    //-------------Escritura de dirección para transmisión--------------------
+    //Escritura de la dirección pipe 0 de recepción 5bytes
+    Comienzo_de_Trama_SPI();
+        status = Transferir_SPI(CMD_ESCRITURA_nRF | REG_TX_ADDR_nRF );  //envio comando escritura al registro
+        for(n=0;n<5;n++) dato_temp = Transferir_SPI(direccion[n]);  //enviamos los 5 bytes de dirección
+        delayUs(10);
+    Fin_de_Trama_SPI();
+
+    delayUs(1000);
+    //lectura de verificación para la dirección Tx 5bytes
+    Comienzo_de_Trama_SPI();
+        status = Transferir_SPI(CMD_LECTURA_nRF | REG_TX_ADDR_nRF );    //envio comando escritura al registro
+        for(n=0;n<5;n++) verifica_dire[n] = Transferir_SPI(0);  //leemos los 5 bytes de dirección
+        delayUs(10);
+    Fin_de_Trama_SPI();
+
+    delayUs(1000);
+
+    //check si coincide la dirección leida con la que enviamos
+    for(n=0;n<5;n++)
+    {
+        if(direccion[n]!=verifica_dire[n]) while(1);   //se clava aquí si no coinciden
+    }
+    //-------------Fin Escritura de dirección para transmisión--------------------
+
+    dato_temp = 2; //maxima cantidad de bytes a recibir en pipe 0
+    TramaSPI(CMD_ESCRITURA_nRF, REG_RX_PW_P0_nRF, dato_temp); //escribimos
+    reg_config = TramaSPI(CMD_LECTURA_nRF, REG_RX_PW_P0_nRF, 0);//check
+    while(reg_config != dato_temp){;} //si no coincide con lo que se escribió se queda acá
+
+//--------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+     //--Encendido (power up) y modo PTX
+        dato_temp = MASK_TX_DS_BIT|MASK_MAX_RT_BIT|EN_CRC_BIT|PWR_UP_BIT;//aca el Power Up se va a 1 llevandolo a Stand By
+        TramaSPI(CMD_ESCRITURA_nRF, REG_CONFIG_nRF, dato_temp); //No se va a activar por interrupciones de transmisor
+        reg_config = TramaSPI(CMD_LECTURA_nRF, REG_CONFIG_nRF, 0);//check
+        while(reg_config != dato_temp){;} //si no coincide con lo que se escribió se queda acá
+    //-----esperamos un tiempo luego del power-up para establecer el modo---------
+        delayUs(15); // 15uSeg.
+    //----------------------------------------------------------------------------
+    if(MODO_TRANSMISOR==0)
+    {//Etapa de receptor
+    //#ifndef MODO_TRANSMISOR    //si no esta en modo transmisor configura el modo receptor
+        dato_temp = reg_config|PRIM_RX_BIT; //dato a escribir agrega Modo RX
+        TramaSPI(CMD_ESCRITURA_nRF, REG_CONFIG_nRF, dato_temp); //deshabilito interrupt por Tx y por MaxRT, power up=1
+        reg_config = TramaSPI(CMD_LECTURA_nRF, REG_CONFIG_nRF, 0);//check
+        while(reg_config != dato_temp){;} //si no coincide con lo que se escribió se queda acá
+    //#endif
+    }
+
+    //aquí debería estar en standby I mode
+
+//#ifndef MODO_TRANSMISOR  //Si no es MODO TRANSMISOR  habilito el CE para modo RX
+    if(MODO_TRANSMISOR==0)
+    {
+            //-----FLUSH RX------------------
+            Comienzo_de_Trama_SPI();
+            status = Transferir_SPI(FLUSH_RX);
+            //FLUSH, descarta t0do lo que este en este registro
+            delayUs(10);
+            Fin_de_Trama_SPI();
+            //-----Fin FLUSH RX----------------
+
+            HWREG(GPIO_PORTD_BASE + (GPIO_PIN_7 << 2)) = GPIO_PIN_7; //Modo RX pin CE  en 1
+            //Con la linea de arriba junto con el PRIM_RX_BIT ya tenemos el transimisor en Receptor
+    }
+    delayMs(10);
+
+
+    while(1)
+    {
+        //---------------Transmisor--------------------------------------------------------
+         if( HWREG(GPIO_PORTF_BASE + (GPIO_PIN_4 << 2))== 0) //Es el SDC_SSI_RX el GPIO_PIN_4 en fin el pulsador
+         {
+             count =0;
+             do {
+                 count++;
+                } while ((HWREG(GPIO_PORTF_BASE + (GPIO_PIN_4 << 2))== 0) && (count < 50000));
+             if(count >= 50000)
+             {
+                HWREG(GPIO_PORTD_BASE + (GPIO_PIN_7 << 2)) = 0; //pin CE  en 0 para que vuelva a Stand By 1
+                delayUs(15); // 15uSeg.
+                MODO_TRANSMISOR=1;
+                //usado=0;
+                delayUs(15); // 15uSeg.
+                //TramaSPI(CMD_ESCRITURA_nRF, REG_CONFIG_nRF, 0);
+                dato_temp = reg_config & ~(PRIM_RX_BIT); //pongo la PRIM_RX_BIT en 0
+                TramaSPI(CMD_ESCRITURA_nRF, REG_CONFIG_nRF, dato_temp); //
+                reg_config = TramaSPI(CMD_LECTURA_nRF, REG_CONFIG_nRF, 0);//check
+                HWREG(GPIO_PORTD_BASE + (GPIO_PIN_7 << 2)) = GPIO_PIN_7; //pin CE  en 1
+                //Tendria las condiciones para ir Tx MODE
+                delayUs(15); // 15uSeg.
+                reg_config = TramaSPI(CMD_LECTURA_nRF, REG_FIFO_STATUS_nRF,0); //leer status de la FIFO TX
+
+                if(reg_config & (1<<4))  //Esta vacia la FIFO TX?
+                      {
+                          //Cargamos 2 bytes
+                          Comienzo_de_Trama_SPI();
+                          status = Transferir_SPI(W_TX_PAYLOAD);   //envio comando escritura al registro
+
+                          Transferir_SPI(var); //enviamos el dato1 a escribir, aca le decimos que comando quiero escribir
+                          Transferir_SPI(var2);    //enviamos el dato2 a escribir
+
+                          delayUs(80); //hay que darle tiempo para que salgan los datos de SPI
+                          Fin_de_Trama_SPI();
+                          delayUs(250);  //esto es para que exista un tiempo minimo en alto de Fin_de_Trama (Ej. si vuelven a enviar otra trama inmediatamente)
+
+                          //-----FLUSH TX------------------
+                          Comienzo_de_Trama_SPI();
+                          status = Transferir_SPI(FLUSH_TX);
+                          delayUs(10);
+                          Fin_de_Trama_SPI();
+                          //-----Fin FLUSH TX----------------
+                          delayUs(100);
+
+                          status=TramaSPI(CMD_ESCRITURA_nRF,REG_STATUS_nRF,(TX_DS|MAX_RT));
+
+                          HWREG(GPIO_PORTD_BASE + (GPIO_PIN_7 << 2)) = 0; // pin CE  en 0 para volver a Stand By 1
+
+                          delayUs(1000); //espero >130uS para que se realice la transmisión
+                          dato_temp = reg_config|PRIM_RX_BIT|MASK_RX_DR_BIT|MASK_TX_DS_BIT|PWR_UP_BIT; //Pone en 1 el PRIM_RX_BIT, primer condicion para ir Rx MODE
+                          TramaSPI(CMD_ESCRITURA_nRF, REG_CONFIG_nRF, dato_temp); //paso los datos
+                          reg_config = TramaSPI(CMD_LECTURA_nRF, REG_CONFIG_nRF, 0);//check
+                          HWREG(GPIO_PORTD_BASE + (GPIO_PIN_7 << 2)) = GPIO_PIN_7; //pin CE  en 1, segunda condicion para llegar a Rx MODE
+                          delayUs(130); // 130uSeg.
+                          MODO_TRANSMISOR=0;
+                      }
+             }
+         }
+         //------------------------------------------------------------------------------
+        else//para el if de arriba
+        {
+         fifo_status= TramaSPI(CMD_LECTURA_nRF, REG_FIFO_STATUS_nRF,0); //leer cantidad de datos disponibles en el FIFO
+         //Pregunto por el byte menos significativo
+         if(!(fifo_status & 0x01))//la Fifo RX no esta vacia
+         {
+            //rx = TramaSPI(CMD_LECTURA_nRF, R_RX_PAYLOAD ,0);//sacamos de a uno
+            Comienzo_de_Trama_SPI();
+            status = Transferir_SPI(R_RX_PAYLOAD);  //envio comando lectura al registro
+            dato1=Transferir_SPI(0x0);
+            dato2=Transferir_SPI(0x0);
+            delayUs(100); //hay que darle tiempo para que salgan los datos de SPI
+            Fin_de_Trama_SPI();
+            delayUs(150);
+            status=TramaSPI(CMD_ESCRITURA_nRF,REG_STATUS_nRF,(RX_DR/*|MAX_RT)*/));//BORRO FLAG DE INTERRUPCION
+            //-----FLUSH RX------------------
+            Comienzo_de_Trama_SPI();
+            status = Transferir_SPI(FLUSH_RX);
+            delayUs(10);
+            Fin_de_Trama_SPI();
+            //-----Fin FLUSH RX----------------
+         }
+        }
+    }
+}
+
+void Config_GPIO(void)
+{
+
+    HWREG(SYSCTL_RCGC2) |= SYSCTL_RCGC2_GPIOD|SYSCTL_RCGC2_GPIOF; //habilita el clock al PORTD y PORTF
+
+
+    HWREG(GPIO_PORTD_BASE + GPIO_O_LOCK)=0x4C4F434B;  //desbloqueo del pin 7
+    HWREG(GPIO_PORTD_BASE + GPIO_O_CR)= GPIO_PIN_7;
+
+
+    HWREG(GPIO_PORTD_BASE + GPIO_O_DEN) = (GPIO_PIN_6 + GPIO_PIN_7);
+    HWREG(GPIO_PORTF_BASE + GPIO_O_DEN) = GPIO_PIN_4;//sw1
+
+
+    HWREG(GPIO_PORTD_BASE + GPIO_O_DIR) = (GPIO_PIN_7);//  bit D6 como entrada y D7 como salida
+
+
+    //HWREG(GPIO_PORTD_BASE + (GPIO_PIN_6 << 2)) = GPIO_PIN_6; //pin CSN       --ya tiene el pin PA3 con funcionalidad SSI0Fss
+
+    HWREG(GPIO_PORTF_BASE + GPIO_O_PUR) = GPIO_PIN_4;   //bit F4 pull up  sw1
+
+    HWREG(GPIO_PORTD_BASE + (GPIO_PIN_7 << 2)) = 0; //arranca con pin CE  en 0
+
+}
+
+
+void Config_SysClock(void)
+{
+unsigned int   i, tempRCC, tempRCC2;
+    //---------------------------------------------------------------------------------------
+    //
+    // Obtenemos los valores actuales de RCC y RCC2
+    //
+    tempRCC = HWREG(SYSCTL_RCC);
+    tempRCC2 =HWREG(SYSCTL_RCC2);
+    //Bypass del PLL, el sysclock vendra de una fuente distinta del PLL
+    tempRCC |= SYSCTL_RCC_BYPASS;
+
+    // deshabilita el divisor a la salida (queda sin dividir),
+    //la fuente de clock pasa directo al sysclock
+    tempRCC &= ~(SYSCTL_RCC_USESYSDIV);
+
+    //Bypass del PLL en RCC2 por las dudas, el sysclock vendra de una fuente distinta del PLL
+    tempRCC2 |= SYSCTL_RCC2_BYPASS2;
+
+    // Se aplica el cambio en los registros en orden //
+    HWREG(SYSCTL_RCC)= tempRCC;
+    HWREG(SYSCTL_RCC2) = tempRCC2;
+    //-----------------------------------------------------------------------------------------
+
+    // Comenzamos a configurar el PLL, lo prendemos y seteamos
+    // para que use un XTAL=16Mhz,ya sabemos que para 80Mhz debemos usar
+    // el RCC2.
+
+    //le hace caso al registro RCC2 para la configuración
+    tempRCC2 |= SYSCTL_RCC2_USERCC2;
+    tempRCC2 &= ~(SYSCTL_RCC2_OSCSRC2_M); //Main Clock XTAL, en realidad SYSCTL_RCC2_OSCSRC2_M es el de 32.768kHz pero al inverir sus valores queda 0 que es el oscilador principal XTAL MOSC
+
+    //esta configuración queda en el RCC porque el RCC2 no la tiene
+    tempRCC  &= ~(SYSCTL_RCC_XTAL_M); //limpiamos la parte de selección de cristal para poder agregar solo el de Xtal16Mhz
+
+    tempRCC  |= SYSCTL_RCC_XTAL_16MHZ;
+
+
+    tempRCC2 &= ~(SYSCTL_RCC2_PWRDN2); //PLL activo
+
+    // Se aplica el cambio a los registros, pero todavía sigue bypass el PLL
+    HWREG(SYSCTL_RCC) = tempRCC;
+    HWREG(SYSCTL_RCC2) = tempRCC2;
+
+    //habría que esperar el tiempo de estabilización del main oscilator
+    //-----------------------------------------------------------------------------------------
+
+
+    //setea el pll para que pasen 400Mhz a la salida y no predividido por 2
+
+    tempRCC2 |= SYSCTL_RCC2_DIV400;  //ponemos DIV400=1
+    tempRCC2 &= ~ (SYSCTL_RCC2_SYSDIV2_M | SYSCTL_RCC2_SYSDIV2LSB); //borramos todos los bits que son del divisor
+
+    //para poner el  SYSDIV2=2 + DIV2LSB = 4     el divisor queda =4+1=5
+    tempRCC2 |= (0x2 << SYSCTL_RCC2_SYSDIV2_S);   //para poner el  SYSDIV2=2 y SYSCTL_RCC2_SYSDIV2LSB=0; estas dos cosas dan un divisor de 5: 400Mhz/5=80Mhz
+
+    //ver
+    HWREG(SYSCTL_RCC) = tempRCC;
+    HWREG(SYSCTL_RCC2) = tempRCC2;
+    //poner el polling del PLL lock aqui
+    //pllstat.LOCK
+    while(!(HWREG(SYSCTL_PLLSTAT) & SYSCTL_PLLSTAT_LOCK ) && !(HWREG(SYSCTL_RIS) & SYSCTL_RIS_PLLLRIS ))
+            {
+            asm(" nop");
+
+            }
+    //si esta enganchado el PLL, pasar el systemclock a
+    //la fuente que viene del PLL cambiando el SYSCTL_RCC2_BYPASS2
+
+    tempRCC &= ~(SYSCTL_RCC_BYPASS);
+    tempRCC2 &= ~(SYSCTL_RCC2_BYPASS2);
+
+    HWREG(SYSCTL_RCC) = tempRCC;
+    HWREG(SYSCTL_RCC2) = tempRCC2;
+
+    //esperamos un momento por la transición del clock
+    for (i=0;i<100; i++)
+    {
+     asm(" nop");
+    }
+
+    //Listo!!, 80Mhz de sysclock
+}
+
+
+uint32_t TramaSPI(int8_t comando_nRF,int8_t registro_nRF,int8_t datoW)
+{
+   uint32_t tempLectura=0;
+   //------------------------------------------------------------------------
+   Comienzo_de_Trama_SPI();
+   if(comando_nRF == CMD_LECTURA_nRF)
+     {
+     status = Transferir_SPI(CMD_LECTURA_nRF | registro_nRF );  //envio comando lectura alregistro config
+     tempLectura = Transferir_SPI(0x00);    //leo respuesta
+     }
+
+   if(comando_nRF == CMD_ESCRITURA_nRF)
+   {
+   status = Transferir_SPI(CMD_ESCRITURA_nRF | registro_nRF );  //envio comando escritura al registro
+   tempLectura = Transferir_SPI(datoW); //enviamos el dato a escribir
+   }
+   delayUs(5);
+   Fin_de_Trama_SPI();
+   //------------------------------------------------------------------------
+   delayUs(50);  //esto es para que exista un tiempo minimo en alto de Fin_de_Trama (Ej. si vuelven a enviar otra trama inmediatamente)
+   return(tempLectura);
+}
+//-----------------------------------------------Configuracion ADC-----------------------------------------------------
+/*void Config_ADC(void)
+{
+    int a;
+    //-----------------CONFIGURACIÓN DEL ADC----------------------------
+    HWREG(SYSCTL_RCGCADC) |= SYSCTL_RCGCADC_R0;// HABILITO EL CLOCK DEL ADC 0
+    HWREG(SYSCTL_RCGC2) |= SYSCTL_RCGC2_GPIOE;//HABILITO EL CLOCK DEL PUERTO E
+    HWREG(GPIO_PORTE_BASE + GPIO_O_AFSEL) |= GPIO_PIN_3;//LE HABILITO LA FUNCION ALTERNATIVA AL PIN 3, DEL PUERTO E, QUE CORRESPONDE AL ADC0
+    for(a=0;a<100;a++);//delay
+    HWREG(GPIO_PORTE_BASE + GPIO_O_DEN) &= ~GPIO_PIN_3;//Le saco la función digital
+    HWREG(GPIO_PORTE_BASE + GPIO_O_AMSEL) |= GPIO_PIN_3;//Habilito la función analogica
+    //dejamos la prioridad del secuenciador por defecto
+
+    //-----------------Configuración del secuenciador--------------------
+    HWREG(ADC0_BASE + ADC_O_ACTSS) &= ~ADC_SSMUX1_MUX0_M;//DESHABILITO EL SECUENCIADOR
+    //HWREG(ADC0_BASE + ADC_O_EMUX) |= ADC_EMUX_EM1_PROCESSOR;//EL DISPARO ES MEDIANTE EL PROCESADOR
+    //HWREG(ADC0_BASE + ADC_O_SSMUX1) &= 0xFFF0;//CUAL CANAL TIENE QUE AGARRAR, EL 0 ES POR EL AIN0
+    HWREG(ADC0_BASE + ADC_O_SSMUX1) = (0x00 << 0);
+    //los bits 0 a 3 de ADC0_SSCTL1_R quedan en cero, ya que la AN0 no esta muestreada en modo diferencial,
+    //no es la última muestra del sample secuencer, no debe generar interrupcion y no es el sensor de temperaturaver p860
+    HWREG(ADC0_BASE + ADC_O_SSCTL1) &= ~ADC_SSCTL1_D0;
+    HWREG(ADC0_BASE + ADC_O_SSCTL1) &= ~ADC_SSCTL1_END0;
+    HWREG(ADC0_BASE + ADC_O_SSCTL1) &= ~ADC_SSCTL1_IE0;
+    HWREG(ADC0_BASE + ADC_O_SSCTL1) &= ~ADC_SSCTL1_TS0;
+
+    HWREG(ADC0_BASE + ADC_O_SSCTL1) |= ADC_SSCTL1_TS1;//PAG 868 DATASHEET, NECESITAMOS PONER UN UNO EN TS1 Y CUAL ES EL FIN DE LA SEGUNDA MUESTRA QUE VIENE DEL SENSOR DE TEMPERATURA INTERNO
+    HWREG(ADC0_BASE + ADC_O_SSCTL1) |= ADC_SSCTL1_IE1;//GENERO INTERRUPCION POR FIN DE CONVERSION DE LA MUESTRA 1 --> EOC
+    HWREG(ADC0_BASE + ADC_O_SSCTL1) |= ADC_SSCTL1_END1;//LE DOY EL FIN DEL MUESTREO
+    HWREG(ADC0_BASE + ADC_O_IM) |= ADC_IM_MASK1;//HABILITO LA INTERRUPCIÓN
+    HWREG(ADC0_BASE + ADC_O_ACTSS) |= ADC_ACTSS_ASEN1;//HABILITO EL SECUENCIADOR
+
+    HWREG(ADC0_BASE + ADC_O_PSSI) |= ADC_PSSI_SS1;//inicio de conversion
+}*/
+//----------------------------------------------------------------------------------------------
+void delayMs(uint32_t ui32Ms) {
+
+    // 1 clock cycle = 1 / SysCtlClockGet() second
+    // 1 SysCtlDelay = 3 clock cycle = 3 / SysCtlClockGet() second
+    // 1 second = SysCtlClockGet() / 3
+    // 0.001 second = 1 ms = SysCtlClockGet() / 3 / 1000
+
+    SysCtlDelay(ui32Ms * (SysCtlClockGet() / 3 / 1000));
+}
+
+
+
+void delayUs(uint32_t ui32Us) {
+    SysCtlDelay(ui32Us * (SysCtlClockGet() / 3 / 1000000));
+}
+
+
+
